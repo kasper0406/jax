@@ -37,6 +37,10 @@ MeshAxisName = Any
 ResourceAxisName = Hashable
 
 
+class ShardingTypeError(Exception):
+  pass
+
+
 def show_axes(axes):
   return ", ".join(sorted(f"`{a}`" for a in axes))
 
@@ -579,3 +583,16 @@ def get_abstract_mesh() -> AbstractMesh:
 
 def get_concrete_mesh() -> Mesh | None:
   return jax_config.device_context.value
+
+
+def resolve_mesh(*arrays) -> AbstractMesh:
+  """Resolves the mesh between given arrays."""
+  unique_meshes = {x.sharding.mesh for x in arrays if not x.sharding.mesh.empty}
+  if len(unique_meshes) > 1:
+    raise ShardingTypeError(
+        f"Conflicting meshes received. Got: {unique_meshes=}"
+    )
+  elif len(unique_meshes) == 1:
+    return unique_meshes.pop()
+  else:
+    return get_abstract_mesh()

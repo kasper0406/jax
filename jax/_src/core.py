@@ -1955,8 +1955,7 @@ def _invalid_shape_error(shape: Shape, context: str=""):
   return TypeError(msg)
 
 
-class ShardingTypeError(Exception):
-  pass
+ShardingTypeError = mesh_lib.ShardingTypeError
 
 
 # TODO(dougalm): Cast scalar, numpy arrays, etc to jax arrays so that values

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections import OrderedDict, namedtuple
+import itertools
 import re
 from functools import partial, wraps
 import json
@@ -6676,7 +6677,7 @@ class ShardingInTypesTest(jtu.JaxTestCase):
     @partial(jax.shard_map, out_specs=P('x'), axis_names={'x'})
     def f1(x, i, j):
       x_a_j = x.at[:, j].get(out_sharding=jax.typeof(i).sharding)
-      return x.at[:, i].set(x_a_j)
+      return x.at[:, i].set(x_a_j, out_sharding=jax.typeof(x).sharding)
     f1(x,i,j)  # doesn't crash
 
   @config.numpy_rank_promotion('allow')
@@ -6952,7 +6953,7 @@ class ShardingInTypesTest(jtu.JaxTestCase):
                            jax.NamedSharding(mesh, P('x', None)))
     tok = jax.device_put(jnp.arange(8 * 4).reshape(8, 4),
                          jax.NamedSharding(mesh, P()))
-    vmap_tok = jax.device_put(jnp.arange(64 * 4).reshape(64, 4),
+    tok_vmap = jax.device_put(jnp.arange(64 * 4).reshape(64, 4),
                          jax.NamedSharding(mesh, P('x', None)))
 
     @jax.jit
@@ -6972,20 +6973,55 @@ class ShardingInTypesTest(jtu.JaxTestCase):
       out3 = embed_y_sharded.at[:, token_vmap].get()
       self.assertEqual(out3.shape, (64, 64, 4))
       self.assertEqual(out3.aval.sharding.spec, P('y', 'x', None))
-      return out, out2, out3
+      # out3 not returned as it has sharded (unbatched with operand) indexing.
+      # So transpose would require collectives.
+      return out, out2
 
-    outs = f(embed, tok, vmap_tok)
+    outs = f(embed, tok, tok_vmap)
     self.assertEqual(outs[0].sharding, NamedSharding(mesh, P('x', None, None)))
 
     def g(x, y, z):
       outs = f(x, y, z)
       return sum((x.sum() for x in jax.tree.leaves(outs)))
 
-    out = jax.jit(jax.grad(g))(embed, tok, vmap_tok)
+    out = jax.jit(jax.grad(g))(embed, tok, tok_vmap)
     self.assertEqual(out.sharding, embed.sharding)
 
-    out = jax.grad(g)(embed, tok, vmap_tok)
+    out = jax.grad(g)(embed, tok, tok_vmap)
     self.assertEqual(out.sharding, embed.sharding)
+
+  @parameterized.named_parameters(
+      (f'operand_{spec_name}_sharded_{op_name}', operand_spec, op)
+      for (spec_name, operand_spec), (op_name, op) in itertools.product(
+          (('xy', P('x', None, 'y')), ('x', P('x', None, None))),
+          (('set', lambda x, ind, y: x.at[ind].set(y)),
+           ('add', lambda x, ind, y: x.at[ind].add(y)),
+           ('mul', lambda x, ind, y: x.at[ind].mul(y)),
+           ('min', lambda x, ind, y: x.at[ind].min(y)),
+           ('max', lambda x, ind, y: x.at[ind].max(y)),
+           ('dynamic_update_slice_in_dim', lambda x, ind, y: (
+               jax.lax.dynamic_update_slice_in_dim(x, y[None], ind, axis=0))))
+      )
+  )
+  @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
+  def test_scatter_sharding_rule(self, operand_spec, scatter_fn, mesh):
+    operand = jax.device_put(jnp.zeros((2, 10, 8)),
+                             jax.NamedSharding(mesh, operand_spec))
+    indices = jax.device_put(jnp.array([2, 3], dtype=jnp.int32),
+                             jax.NamedSharding(mesh, P('x')))
+    updates = jax.device_put(jnp.ones((2, 8)),
+                             jax.NamedSharding(mesh, P('x', 'y')))
+
+    f = jax.jit(jax.vmap(scatter_fn))
+
+    out = f(operand, indices, updates)
+    self.assertEqual(out.sharding.spec, P('x', None, 'y'))
+
+    def g(*args):
+      return f(*args).sum()
+
+    out = jax.grad(g)(operand, indices, updates)
+    self.assertEqual(out.sharding.spec, P('x', None, 'y'))
 
   @jtu.with_explicit_mesh((2, 2), ('x', 'y'))
   def test_reshard_error(self, mesh):
@@ -8003,14 +8039,14 @@ class ShardingInTypesTest(jtu.JaxTestCase):
     @jax.jit
     def f1(x, i, j):
       x_a_j = x.at[:, j].get(out_sharding=jax.typeof(i).sharding)
-      return x.at[:, i].set(x_a_j)
+      return x.at[:, i].set(x_a_j, out_sharding=jax.typeof(x).sharding)
     f1(x,i,j)  # doesn't crash
 
     @jax.jit
     @jax.vmap
     def f2(x, i, j):
       x_j = x.at[j].get(out_sharding=jax.typeof(x).sharding)
-      return x.at[i].set(x_j)
+      return x.at[i].set(x_j, out_sharding=jax.typeof(x).sharding)
     f2(x,i,j)  # doesn't crash
 
   @jtu.with_explicit_mesh((4, 2), ('x', 'y'))
@@ -8439,16 +8475,16 @@ class ShardingInTypesTest(jtu.JaxTestCase):
     x_updated = xs.at[:, ids].add(scalar)
     self.assertEqual(x_updated.sharding, NamedSharding(mesh, P('x', None)))
 
-    @jax.jit
-    def f(x, ids, scalar):
-      out = x.at[:, ids].add(scalar)
+    @partial(jax.jit, static_argnames=('out_sharding',))
+    def f(x, ids, scalar, out_sharding = None):
+      out = x.at[:, ids].add(scalar, out_sharding=out_sharding)
       self.assertEqual(out.aval.sharding.spec, P('x', None))
       return out
 
     out = f(xs, ids, scalar)
     self.assertEqual(out.sharding, NamedSharding(mesh, P('x', None)))
 
-    out = f(xs, reshard(ids, P('x')), scalar)
+    out = f(xs, reshard(ids, P('x')), scalar, out_sharding=P('x', None))
     self.assertEqual(out.sharding, NamedSharding(mesh, P('x', None)))
 
   @config.numpy_dtype_promotion('standard')

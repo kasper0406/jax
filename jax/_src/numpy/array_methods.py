@@ -831,6 +831,7 @@ class _IndexUpdateRef:
   def set(self, values: ArrayLike, *, indices_are_sorted: bool = False,
           unique_indices: bool = False,
           mode: str | lax_slicing.GatherScatterMode | None = None,
+          out_sharding: Sharding | PartitionSpec | None = None,
           wrap_negative_indices: bool = True) -> None:
     """Pure equivalent of ``x[idx] = y``.
 
@@ -839,11 +840,14 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    out_s = _val_sharding(self.array)
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, '.set')
     return scatter._scatter_update(
         self.array, self.index, values, lax_slicing.scatter,
         indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
-        mode=mode, out_sharding=out_s, normalize_indices=wrap_negative_indices)
+        mode=mode, out_sharding=out_sharding,
+        normalize_indices=wrap_negative_indices)
 
   def apply(self, func: Callable[[ArrayLike], Array], *,
             indices_are_sorted: bool = False, unique_indices: bool = False,
@@ -872,6 +876,7 @@ class _IndexUpdateRef:
   def add(self, values: ArrayLike, *,
           indices_are_sorted: bool = False, unique_indices: bool = False,
           mode: str | lax_slicing.GatherScatterMode | None = None,
+          out_sharding: Sharding | PartitionSpec | None = None,
           wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] += y``.
 
@@ -880,11 +885,14 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    out_s = _val_sharding(self.array)
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, '.add')
     return scatter._scatter_update(
         self.array, self.index, values, lax_slicing.scatter_add,
         indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
-        mode=mode, normalize_indices=wrap_negative_indices, out_sharding=out_s)
+        mode=mode, out_sharding=out_sharding,
+        normalize_indices=wrap_negative_indices)
 
   def subtract(self, values: ArrayLike, *,
                indices_are_sorted: bool = False, unique_indices: bool = False,
